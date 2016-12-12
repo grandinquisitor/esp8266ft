@@ -157,6 +157,7 @@ void loop() {
         Serial.println("IP address: ");
         Serial.println(WiFi.localIP());
 
+        finish_wifi_connection();
         Serial.println("listening to udp on port 1337");
         gotWifi = true;
       }
