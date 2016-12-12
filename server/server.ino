@@ -1,34 +1,26 @@
+
 extern "C" {
-  #include "osapi.h"
-  #include "ets_sys.h"
-  #include "user_interface.h"
+#include "osapi.h"
+#include "ets_sys.h"
+#include "user_interface.h"
 }
 
 #include <lwip/udp.h>
 
 #include <ESP8266WiFi.h>
 
-#include "FastLED.h"
-
-FASTLED_USING_NAMESPACE
+#include <NeoPixelBrightnessBus.h>
 
 const char* ssid     = "Noisebridge Legacy 2.4 gHz";
 
 #define BRIGHTNESS          96
 #define NETWORK_TIMEOUT     10
 
-int count_leds(const int* num_leds_arr, const int len) {
-  int count = 0;
-  for (int i = 0; i < len; i++) {
-    count += num_leds_arr[i];
-  }
-  return count;
-}
-
 const int NUM_LEDS_PER_STRIP[8] = {277, 277, 24, 39, 14, 9, 105, 65};
-const int NUM_LEDS = count_leds(NUM_LEDS_PER_STRIP, 8);
 
-const int WIDTH = NUM_LEDS;
+const uint16_t TOTAL_LEN = 810;
+const uint8_t NUM_STRIPS = 8;
+const int WIDTH = TOTAL_LEN;
 const int HEIGHT = 1;
 
 udp_pcb *_pcb;
@@ -45,7 +37,39 @@ static const int kBufferSize = 5000;
 char packetBuffer[kBufferSize];
 int packetSize = 0;
 
-static CRGB leds[810];
+NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod> strips [] = {
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[0], 0),
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[1], 1),
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[2], 2),
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[3], 3),
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[4], 4),
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[5], 5),
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[6], 6),
+  NeoPixelBrightnessBus<NeoGrbFeature, Neo800KbpsMethod>(NUM_LEDS_PER_STRIP[7], 7),
+};
+
+void set_led(const uint32_t addr, RgbColor col) {
+  uint8_t strip_ix = 0;
+  uint16_t strip_offset = 0;
+  uint16_t current_count = 0;
+
+  for (uint8_t i = 0; i < NUM_STRIPS; ++i) {
+    if (current_count + NUM_LEDS_PER_STRIP[i] < addr) {
+      current_count += NUM_LEDS_PER_STRIP[i];
+    } else {
+      strip_ix = i;
+      strip_offset = NUM_LEDS_PER_STRIP[i] - (addr - current_count);
+    }
+  }
+
+  strips[strip_ix].SetPixelColor(strip_offset, col);
+}
+
+void show_all() {
+  for (uint8_t i = 0; i < NUM_STRIPS; ++i) {
+    strips[i].Show();
+  }
+}
 
 int last = 0;
 int fps = 30;
@@ -68,6 +92,29 @@ struct ImageMetaInfo {
   int layer;      // stacked layer
 };
 
+#define TIMECTL_MAXTICKS  4294967295L
+#define TIMECTL_INIT      0
+
+int IsTime(uint32_t *timeMark, uint32_t timeInterval) {
+  uint32_t timeCurrent;
+  uint32_t timeElapsed;
+  int result = false;
+
+  timeCurrent = millis();
+  if (timeCurrent < *timeMark) { //Rollover detected
+    timeElapsed = (TIMECTL_MAXTICKS - *timeMark) + timeCurrent; //elapsed=all the ticks to overflow + all the ticks since overflow
+  }
+  else {
+    timeElapsed = timeCurrent - *timeMark;
+  }
+
+  if (timeElapsed >= timeInterval) {
+    *timeMark = timeCurrent;
+    result = true;
+  }
+  return (result);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(10);
@@ -77,39 +124,45 @@ void setup() {
   Serial.print("Connecting to ");
   Serial.println(ssid);
 
-  WiFi.begin(ssid);
-  //   WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  for (uint8_t i = 0; i < NUM_STRIPS; ++i) {
+    strips[i].SetBrightness(BRIGHTNESS);
   }
 
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid);
+  //   WiFi.begin(ssid, password);
+}
 
+void finish_wifi_connection() {
   _pcb = udp_new();
   udp_recv(_pcb, &recv, 0);
   ip_addr_t addr;
   addr.addr = IPADDR_ANY;
   int port = 1337;
   udp_bind(_pcb, &addr, port);
-  Serial.println("listening to udp on port 1337");
-  FastLED.addLeds<WS2812B, 1, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 0), NUM_LEDS_PER_STRIP[0]);
-  FastLED.addLeds<WS2812B, 2, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 1), NUM_LEDS_PER_STRIP[1]);
-  FastLED.addLeds<WS2812B, 3, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 2), NUM_LEDS_PER_STRIP[2]);
-  FastLED.addLeds<WS2812B, 4, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 3), NUM_LEDS_PER_STRIP[3]);
-  FastLED.addLeds<WS2812B, 5, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 4), NUM_LEDS_PER_STRIP[4]);
-  FastLED.addLeds<WS2812B, 6, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 5), NUM_LEDS_PER_STRIP[5]);
-  FastLED.addLeds<WS2812B, 7, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 6), NUM_LEDS_PER_STRIP[6]);
-  FastLED.addLeds<WS2812B, 8, GRB>(leds, count_leds(NUM_LEDS_PER_STRIP, 7), NUM_LEDS_PER_STRIP[7]);
-
-  FastLED.setBrightness(BRIGHTNESS);
 }
 
 void loop() {
+  static uint32_t lastHueUpdate = millis();
+  static bool gotWifi = false;
+  static uint32_t lastConnectionCheck = 0;
+
+  if (!gotWifi) {
+    if (IsTime(&lastConnectionCheck, 500)) {
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.print(".");
+      } else {
+        Serial.println("");
+        Serial.println("WiFi connected");
+        Serial.println("IP address: ");
+        Serial.println(WiFi.localIP());
+
+        Serial.println("listening to udp on port 1337");
+        gotWifi = true;
+      }
+    }
+  }
+
   if (unhandled) {
 
     int start = millis();
@@ -125,25 +178,27 @@ void loop() {
       const byte green  = *pixel_pos++;
       const byte blue = *pixel_pos++;
 
-      leds[x + img_info.offset_x] = CRGB(red, green, blue);
+      set_led(x + img_info.offset_x, RgbColor(red, green, blue));
     }
     // If this runs too frequently, the network traffic can back up and overwhelm the network stack, which
     // doesn't seem to gracefully discard packets.
     if (millis() - last > time_between_frames) {
-      FastLED.show();
+      show_all();
     }
     last = millis();
     unhandled = 0;
+
   } else if (millis() - last_packet > (1000 * NETWORK_TIMEOUT) ) {
     if (millis() - last < time_between_frames) {
       return;
     }
     int start = millis();
     rainbowWithGlitter();
-    FastLED.show();
+    show_all();
   }
-  EVERY_N_MILLISECONDS( 20 ) {
-    gHue++;  // slowly cycle the "base color" through the rainbow
+
+  if (IsTime(&lastHueUpdate, 20)) {
+    gHue++;
   }
 }
 
@@ -230,13 +285,23 @@ const char *ReadImageData(const char *in_buffer, size_t buf_len,
   return parse_buffer;
 }
 
-void rainbow()
+void fill_rainbow(
+  uint8_t initialhue,
+  uint8_t deltahue )
 {
-  // FastLED's built-in rainbow generator
-  fill_rainbow( leds, NUM_LEDS, gHue, 7);
+  uint8_t hue = initialhue;
+  uint8_t val = 255;
+  uint8_t sat = 240;
+  for ( int i = 0; i < TOTAL_LEN; i++) {
+    set_led(i, HsbColor(hue, sat, val));
+    hue += deltahue;
+  }
 }
 
-void addGlitter( fract8 chanceOfGlitter);
+void rainbow()
+{
+  fill_rainbow(gHue, 7);
+}
 
 void rainbowWithGlitter()
 {
@@ -246,9 +311,9 @@ void rainbowWithGlitter()
   addGlitter(80);
 }
 
-void addGlitter( fract8 chanceOfGlitter)
+void addGlitter( uint8_t chanceOfGlitter)
 {
-  if ( random8() < chanceOfGlitter) {
-    leds[ random16(NUM_LEDS) ] += CRGB::White;
+  if ( random(0, 255) < chanceOfGlitter) {
+    set_led(random(0, TOTAL_LEN), RgbColor(255));
   }
 }
